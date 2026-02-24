@@ -13,3 +13,4 @@ htmlcov/
 .env
 downloads/
 alembic.ini
+*.egg-info/
