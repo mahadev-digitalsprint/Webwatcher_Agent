@@ -1,8 +1,17 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from webwatcher.api.router import api_router
 from webwatcher.core.config import get_settings
 from webwatcher.core.logger import configure_logging
+from webwatcher.db.bootstrap import bootstrap_database
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await bootstrap_database()
+    yield
 
 
 def create_app() -> FastAPI:
@@ -14,10 +23,10 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
     app.include_router(api_router, prefix="/api/v1")
     return app
 
 
 app = create_app()
-

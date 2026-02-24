@@ -15,7 +15,13 @@ async def trigger_scan(company_id: int, db: AsyncSession = Depends(get_db_sessio
     company = await db.get(Company, company_id)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found.")
-    run_monitor_task.delay(company_id)
+    try:
+        run_monitor_task.delay(company_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Scan queue unavailable: {exc}",
+        ) from exc
     return ScanTriggerResponse(queued=True, company_id=company_id)
 
 
@@ -33,4 +39,3 @@ async def get_scan_status(
     )
     rows = result.scalars().all()
     return [ScanRunOut.model_validate(row, from_attributes=True) for row in rows]
-

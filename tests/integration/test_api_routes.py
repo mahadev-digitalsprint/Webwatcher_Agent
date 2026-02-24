@@ -57,3 +57,48 @@ async def test_company_and_monitor_routes(monkeypatch, tmp_path) -> None:
 
     await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_trigger_scan_returns_503_when_queue_unavailable(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "api_unavailable.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async def override_db() -> AsyncIterator[AsyncSession]:
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app = create_app()
+    app.dependency_overrides[get_db_session] = override_db
+
+    from webwatcher.api import routes_monitor
+
+    def _raise_delay(_: int) -> None:
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(routes_monitor.run_monitor_task, "delay", _raise_delay)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        created = await client.post(
+            "/api/v1/companies",
+            json={
+                "name": "Queue Test Co",
+                "base_url": "https://queuetest.example.com",
+                "scan_interval_minutes": 90,
+            },
+        )
+        assert created.status_code == 201
+        company_id = created.json()["id"]
+
+        trigger = await client.post(f"/api/v1/monitor/trigger/{company_id}")
+        assert trigger.status_code == 503
+
+    await engine.dispose()
