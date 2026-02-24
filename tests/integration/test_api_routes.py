@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from webwatcher.app import create_app
 from webwatcher.core.database import get_db_session
-from webwatcher.db.models import Base
+from webwatcher.db.models import Base, Document, Snapshot
 
 
 @pytest.mark.asyncio
@@ -100,5 +100,82 @@ async def test_trigger_scan_returns_503_when_queue_unavailable(monkeypatch, tmp_
 
         trigger = await client.post(f"/api/v1/monitor/trigger/{company_id}")
         assert trigger.status_code == 503
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_and_document_visibility_routes(tmp_path) -> None:
+    db_path = tmp_path / "api_visibility.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async def override_db() -> AsyncIterator[AsyncSession]:
+        async with session_maker() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app = create_app()
+    app.dependency_overrides[get_db_session] = override_db
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        created = await client.post(
+            "/api/v1/companies",
+            json={
+                "name": "Artifact Co",
+                "base_url": "https://artifact.example.com",
+                "scan_interval_minutes": 90,
+            },
+        )
+        assert created.status_code == 201
+        company_id = created.json()["id"]
+
+        async with session_maker() as session:
+            snapshot = Snapshot(
+                company_id=company_id,
+                scan_run_id=None,
+                source_url="https://artifact.example.com/investor",
+                page_hash="hash-page-1",
+                numbers_hash="hash-num-1",
+                section_hashes={"0": "abc"},
+                normalized_json={"pdf_links": ["https://artifact.example.com/docs/q1.pdf"]},
+                raw_blob_path="1/20260224T000000Z/page.html",
+            )
+            session.add(snapshot)
+            await session.flush()
+
+            doc = Document(
+                company_id=company_id,
+                snapshot_id=snapshot.id,
+                url="https://artifact.example.com/docs/q1.pdf",
+                doc_hash="doc-hash-1",
+                content_type="application/pdf",
+                storage_path="1/20260224T000000Z/document.pdf",
+            )
+            session.add(doc)
+            await session.commit()
+
+        snapshots = await client.get(f"/api/v1/companies/{company_id}/snapshots")
+        assert snapshots.status_code == 200
+        assert len(snapshots.json()) == 1
+        assert snapshots.json()[0]["pdf_links"] == ["https://artifact.example.com/docs/q1.pdf"]
+
+        documents = await client.get(f"/api/v1/companies/{company_id}/documents")
+        assert documents.status_code == 200
+        assert len(documents.json()) == 1
+
+        links = await client.get(f"/api/v1/companies/{company_id}/crawl-links")
+        assert links.status_code == 200
+        payload = links.json()
+        assert "https://artifact.example.com/investor" in payload["page_urls"]
+        assert "https://artifact.example.com/docs/q1.pdf" in payload["pdf_links_found"]
+        assert "https://artifact.example.com/docs/q1.pdf" in payload["pdf_documents_stored"]
 
     await engine.dispose()

@@ -67,8 +67,16 @@ def render() -> None:
     companies = _load_companies(api_base)
     company_map = {f"{c['id']} - {c['name']}": c["id"] for c in companies}
 
-    tab_overview, tab_add, tab_trigger, tab_status, tab_changes, tab_compare = st.tabs(
-        ["Overview", "Add Company", "Trigger Scan", "Scan Status", "Changes", "Compare Snapshots"]
+    tab_overview, tab_add, tab_trigger, tab_status, tab_changes, tab_compare, tab_artifacts = st.tabs(
+        [
+            "Overview",
+            "Add Company",
+            "Trigger Scan",
+            "Scan Status",
+            "Changes",
+            "Compare Snapshots",
+            "Snapshots & PDFs",
+        ]
     )
 
     with tab_overview:
@@ -166,7 +174,49 @@ def render() -> None:
             else:
                 st.error(str(data))
 
+    with tab_artifacts:
+        st.subheader("Snapshots, Crawled Links, and PDF Documents")
+        if not company_map:
+            st.info("Add or load a company first.")
+        else:
+            selected = st.selectbox("Company", list(company_map.keys()), key="artifact_company")
+            limit = st.slider("Artifact Rows", min_value=20, max_value=500, value=150, step=10)
+            if st.button("Load Artifacts"):
+                company_id = company_map[selected]
+                ok_links, crawl_links = _get(
+                    api_base,
+                    f"/companies/{company_id}/crawl-links",
+                    params={"limit": limit},
+                )
+                ok_snaps, snapshots = _get(
+                    api_base,
+                    f"/companies/{company_id}/snapshots",
+                    params={"limit": limit},
+                )
+                ok_docs, documents = _get(
+                    api_base,
+                    f"/companies/{company_id}/documents",
+                    params={"limit": limit},
+                )
+
+                if not ok_links:
+                    st.error(f"Crawl links error: {crawl_links}")
+                else:
+                    st.markdown("**Crawl Summary**")
+                    st.json(crawl_links)
+
+                if not ok_snaps:
+                    st.error(f"Snapshots error: {snapshots}")
+                elif isinstance(snapshots, list):
+                    st.markdown("**Snapshots**")
+                    _render_dataframe(snapshots, "No snapshots found.")
+
+                if not ok_docs:
+                    st.error(f"Documents error: {documents}")
+                elif isinstance(documents, list):
+                    st.markdown("**PDF Documents Stored**")
+                    _render_dataframe(documents, "No document entries found.")
+
 
 if __name__ == "__main__":
     render()
-

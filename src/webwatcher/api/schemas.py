@@ -29,6 +29,30 @@ class CompanyOut(BaseModel):
     next_scan_at: datetime | None
 
 
+class SnapshotOut(BaseModel):
+    id: int
+    company_id: int
+    scan_run_id: int | None
+    source_url: str
+    page_hash: str
+    numbers_hash: str
+    raw_blob_path: str | None
+    pdf_links: list[str]
+    created_at: datetime
+
+
+class DocumentOut(BaseModel):
+    id: int
+    company_id: int
+    snapshot_id: int | None
+    url: str
+    doc_hash: str
+    file_size: int | None
+    content_type: str | None
+    storage_path: str | None
+    created_at: datetime
+
+
 class ScanTriggerResponse(BaseModel):
     queued: bool
     company_id: int
@@ -56,4 +80,3 @@ class ChangeOut(BaseModel):
     summary: str
     details: dict[str, Any]
     created_at: datetime
-
