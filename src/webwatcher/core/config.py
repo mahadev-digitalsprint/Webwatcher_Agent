@@ -1,16 +1,35 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _normalize_database_url(url: str) -> str:
-    if url.startswith("postgresql://") and "+asyncpg" not in url.split("://", 1)[0]:
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
-    return url
+    normalized = url
+    if normalized.startswith("postgresql://") and "+asyncpg" not in normalized.split("://", 1)[0]:
+        normalized = normalized.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif normalized.startswith("postgres://"):
+        normalized = normalized.replace("postgres://", "postgresql+asyncpg://", 1)
+
+    parsed = urlparse(normalized)
+    if not parsed.scheme.startswith("postgresql+asyncpg"):
+        return normalized
+
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    fixed_pairs: list[tuple[str, str]] = []
+    has_ssl = any(k == "ssl" for k, _ in query_pairs)
+    for key, value in query_pairs:
+        if key == "sslmode" and not has_ssl:
+            fixed_pairs.append(("ssl", value))
+            continue
+        if key == "sslmode":
+            continue
+        fixed_pairs.append((key, value))
+
+    new_query = urlencode(fixed_pairs)
+    return urlunparse(parsed._replace(query=new_query))
 
 
 class Settings(BaseSettings):
