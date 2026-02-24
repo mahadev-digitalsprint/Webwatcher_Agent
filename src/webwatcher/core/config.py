@@ -5,6 +5,14 @@ from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _normalize_database_url(url: str) -> str:
+    if url.startswith("postgresql://") and "+asyncpg" not in url.split("://", 1)[0]:
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -18,7 +26,7 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     postgres_url: str | None = Field(default=None, alias="POSTGRES_URL")
-    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
     celery_concurrency: int = Field(default=4, alias="CELERY_CONCURRENCY")
 
     azure_openai_endpoint: str | None = Field(default=None, alias="AZURE_OPENAI_ENDPOINT")
@@ -78,10 +86,9 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def effective_database_url(self) -> str:
-        return self.postgres_url or self.database_url
+        return _normalize_database_url(self.postgres_url or self.database_url)
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

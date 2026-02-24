@@ -16,6 +16,9 @@ Financial IR Monitoring & Intelligence System.
 6. Run Celery beat:
    - `celery -A webwatcher.orchestration.queue.celery_app beat -l info`
 
+Redis default is configured for container networking as `redis://redis:6379/0`.
+For direct local Redis service usage, set `REDIS_URL=redis://localhost:6379/0`.
+
 ## Architecture
 
 The codebase is organized by layers:

@@ -36,9 +36,10 @@ def configure_logging(env: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
+    # Avoid noisy debug logs from background SQLite threads in tests/dev.
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
 
 def get_logger(name: str, **context: Any) -> logging.LoggerAdapter:
     logger = logging.getLogger(name)
     return logging.LoggerAdapter(logger, extra=context)
-
