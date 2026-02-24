@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,7 +11,11 @@ from webwatcher.db.bootstrap import bootstrap_database
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await bootstrap_database()
+    try:
+        await asyncio.wait_for(bootstrap_database(), timeout=12)
+    except TimeoutError:
+        # Keep API available even if compatibility bootstrap is slow on remote DBs.
+        pass
     yield
 
 
