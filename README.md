@@ -15,6 +15,8 @@ Financial IR Monitoring & Intelligence System.
    - `celery -A webwatcher.orchestration.queue.celery_app worker -l info -Q crawl,pdf,extract,diff,alerts,scheduler`
 6. Run Celery beat:
    - `celery -A webwatcher.orchestration.queue.celery_app beat -l info`
+7. Run Streamlit UI:
+   - `streamlit run src/webwatcher/ui/streamlit_app.py`
 
 Redis default is configured for container networking as `redis://redis:6379/0`.
 For direct local Redis service usage, set `REDIS_URL=redis://localhost:6379/0`.
