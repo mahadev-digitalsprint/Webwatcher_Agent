@@ -149,10 +149,13 @@ async def list_company_crawl_links(
         snapshots = snap_result.scalars().all()
         documents = doc_result.scalars().all()
 
-        page_urls = sorted({row.source_url for row in snapshots if row.source_url})
+        page_urls = {row.source_url for row in snapshots if row.source_url}
         found_pdf_links: set[str] = set()
         for row in snapshots:
             normalized = row.normalized_json if isinstance(row.normalized_json, dict) else {}
+            crawled_links = normalized.get("crawled_links", [])
+            if isinstance(crawled_links, list):
+                page_urls.update([link for link in crawled_links if isinstance(link, str)])
             links = normalized.get("pdf_links", [])
             if isinstance(links, list):
                 found_pdf_links.update([link for link in links if isinstance(link, str)])
@@ -161,7 +164,7 @@ async def list_company_crawl_links(
         stored_pdf_paths = sorted({row.storage_path for row in documents if row.storage_path})
         return {
             "company_id": company_id,
-            "page_urls": page_urls,
+            "page_urls": sorted(page_urls),
             "pdf_links_found": sorted(found_pdf_links),
             "pdf_documents_stored": stored_pdf_urls,
             "pdf_storage_paths": stored_pdf_paths,

@@ -59,7 +59,7 @@ async def test_company_and_monitor_routes(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_trigger_scan_returns_503_when_queue_unavailable(monkeypatch, tmp_path) -> None:
+async def test_trigger_scan_falls_back_to_local_when_queue_unavailable(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "api_unavailable.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
     async with engine.begin() as conn:
@@ -80,10 +80,13 @@ async def test_trigger_scan_returns_503_when_queue_unavailable(monkeypatch, tmp_
 
     from webwatcher.api import routes_monitor
 
-    def _raise_delay(_: int) -> None:
-        raise RuntimeError("broker down")
-
-    monkeypatch.setattr(routes_monitor.run_monitor_task, "delay", _raise_delay)
+    ran_local = {"value": False}
+    monkeypatch.setattr(routes_monitor, "_queue_available", lambda: False)
+    monkeypatch.setattr(
+        routes_monitor,
+        "_launch_local_monitor",
+        lambda _background_tasks, _company_id: ran_local.__setitem__("value", True),
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -99,7 +102,9 @@ async def test_trigger_scan_returns_503_when_queue_unavailable(monkeypatch, tmp_
         company_id = created.json()["id"]
 
         trigger = await client.post(f"/api/v1/monitor/trigger/{company_id}")
-        assert trigger.status_code == 503
+        assert trigger.status_code == 200
+        assert trigger.json()["queued"] is True
+        assert ran_local["value"] is True
 
     await engine.dispose()
 
@@ -145,7 +150,13 @@ async def test_snapshot_and_document_visibility_routes(tmp_path) -> None:
                 page_hash="hash-page-1",
                 numbers_hash="hash-num-1",
                 section_hashes={"0": "abc"},
-                normalized_json={"pdf_links": ["https://artifact.example.com/docs/q1.pdf"]},
+                normalized_json={
+                    "pdf_links": ["https://artifact.example.com/docs/q1.pdf"],
+                    "crawled_links": [
+                        "https://artifact.example.com/investor",
+                        "https://artifact.example.com/investor/results",
+                    ],
+                },
                 raw_blob_path="1/20260224T000000Z/page.html",
             )
             session.add(snapshot)
@@ -175,6 +186,7 @@ async def test_snapshot_and_document_visibility_routes(tmp_path) -> None:
         assert links.status_code == 200
         payload = links.json()
         assert "https://artifact.example.com/investor" in payload["page_urls"]
+        assert "https://artifact.example.com/investor/results" in payload["page_urls"]
         assert "https://artifact.example.com/docs/q1.pdf" in payload["pdf_links_found"]
         assert "https://artifact.example.com/docs/q1.pdf" in payload["pdf_documents_stored"]
 

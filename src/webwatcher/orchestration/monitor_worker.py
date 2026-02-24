@@ -1,12 +1,16 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
+from bs4 import BeautifulSoup
 from celery import shared_task
 from sqlalchemy import desc, select
 
 from webwatcher.core.config import get_settings
 from webwatcher.core.database import session_scope
 from webwatcher.core.logger import get_logger
+from webwatcher.crawler.crawler_controller import CrawlerController
 from webwatcher.crawler.fetcher import Fetcher
 from webwatcher.db.models import Change, Company, FinancialMetric, ScanRun, ScanStatus, Snapshot
 from webwatcher.financial.financial_extractor import FinancialExtractor
@@ -16,6 +20,7 @@ from webwatcher.intelligence.materiality_engine import MaterialityEngine
 from webwatcher.llm.llm_client import LlmClient
 from webwatcher.llm.llm_financial_validator import LlmFinancialValidator
 from webwatcher.normalization.html_normalizer import normalize_html
+from webwatcher.normalization.url_utils import normalize_url
 from webwatcher.observability.metrics import Timer, metrics
 from webwatcher.orchestration.locks import DistributedLockError, company_scan_lock
 from webwatcher.pdf.pdf_monitor import PdfMonitor
@@ -29,6 +34,52 @@ def _window_key(company_id: int, window_minutes: int = 30) -> str:
     minute_bucket = now.minute - (now.minute % window_minutes)
     floor = now.replace(minute=minute_bucket, second=0, microsecond=0)
     return f"{company_id}:{floor.isoformat()}"
+
+
+def _extract_same_domain_anchor_links(html: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "lxml")
+    base_domain = urlparse(base_url).netloc.lower()
+    links: set[str] = set()
+    for anchor in soup.find_all("a"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        try:
+            full = normalize_url(href, base_url=base_url)
+        except Exception:
+            continue
+        if urlparse(full).netloc.lower() != base_domain:
+            continue
+        links.add(full)
+    return sorted(links)
+
+
+async def _discover_links_from_sitemap(fetcher: Fetcher, base_url: str, limit: int = 200) -> list[str]:
+    parsed = urlparse(base_url)
+    sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
+    try:
+        response = await fetcher.get(sitemap_url)
+    except Exception:
+        return []
+    if response.status_code >= 400:
+        return []
+    soup = BeautifulSoup(response.text, "xml")
+    domain = parsed.netloc.lower()
+    discovered: set[str] = set()
+    for loc in soup.find_all("loc"):
+        url = (loc.get_text() or "").strip()
+        if not url:
+            continue
+        try:
+            normalized = normalize_url(url)
+        except Exception:
+            continue
+        if urlparse(normalized).netloc.lower() != domain:
+            continue
+        discovered.add(normalized)
+        if len(discovered) >= limit:
+            break
+    return sorted(discovered)
 
 
 async def _load_company(session, company_id: int) -> Company | None:
@@ -70,12 +121,13 @@ async def _get_or_create_scan_run(session, company_id: int) -> ScanRun:
     return run
 
 
-async def run_monitor(company_id: int) -> dict:
+async def run_monitor(company_id: int, use_distributed_lock: bool = True) -> dict:
     settings = get_settings()
     logger = get_logger("webwatcher.monitor", company_id=company_id)
     with Timer("scan_duration_ms"):
         try:
-            with company_scan_lock(company_id):
+            lock_context = company_scan_lock(company_id) if use_distributed_lock else nullcontext()
+            with lock_context:
                 async with session_scope() as session:
                     company = await _load_company(session, company_id)
                     if company is None:
@@ -84,7 +136,9 @@ async def run_monitor(company_id: int) -> dict:
                     scan_run = await _get_or_create_scan_run(session, company_id)
                     scan_run.status = ScanStatus.running.value
                     scan_run.started_at = datetime.now(timezone.utc)
+                    scan_run.error_message = None
                     await session.flush()
+                    await session.commit()
 
                     fetcher = Fetcher()
                     storage_service = StorageService()
@@ -92,8 +146,33 @@ async def run_monitor(company_id: int) -> dict:
                     pdf_monitor = PdfMonitor(fetcher, storage_service, PdfParser())
 
                     target_url = company.ir_url or company.base_url
+                    crawler_controller = CrawlerController(
+                        fetcher,
+                        max_depth=settings.webwatch_crawl_depth,
+                        max_pages=5,
+                    )
+                    discovered_pages = await crawler_controller.crawl_targeted(target_url)
+                    if target_url not in discovered_pages:
+                        discovered_pages.insert(0, target_url)
+
                     response = await fetcher.get(target_url)
                     normalized = normalize_html(response.text, source_url=target_url)
+                    anchor_links = _extract_same_domain_anchor_links(response.text, target_url)
+                    discovered_pages = sorted(set(discovered_pages).union(anchor_links))
+                    if len(discovered_pages) <= 1:
+                        sitemap_links = await _discover_links_from_sitemap(fetcher, target_url, limit=80)
+                        discovered_pages = sorted(set(discovered_pages).union(sitemap_links))
+                    aggregated_pdf_links = set(normalized.pdf_links)
+                    for page_url in discovered_pages[:4]:
+                        if page_url == target_url:
+                            continue
+                        try:
+                            page_response = await fetcher.get(page_url)
+                        except Exception:
+                            continue
+                        page_normalized = normalize_html(page_response.text, source_url=page_url)
+                        aggregated_pdf_links.update(page_normalized.pdf_links)
+                    aggregated_pdf_links_list = sorted(aggregated_pdf_links)
 
                     old_snapshot = await _latest_snapshot(session, company_id)
                     decision = await snapshot_manager.create_snapshot_if_changed(
@@ -106,11 +185,16 @@ async def run_monitor(company_id: int) -> dict:
                     )
 
                     snapshot = decision.snapshot
+                    if snapshot:
+                        normalized_json = snapshot.normalized_json if isinstance(snapshot.normalized_json, dict) else {}
+                        normalized_json["crawled_links"] = discovered_pages
+                        normalized_json["pdf_links"] = aggregated_pdf_links_list
+                        snapshot.normalized_json = normalized_json
                     pdf_result = await pdf_monitor.process_pdf_links(
                         session,
                         company_id=company_id,
                         snapshot_id=snapshot.id if snapshot else None,
-                        links=normalized.pdf_links,
+                        links=aggregated_pdf_links_list,
                     )
 
                     extractor = FinancialExtractor()
@@ -181,6 +265,7 @@ async def run_monitor(company_id: int) -> dict:
 
                     scan_run.status = ScanStatus.succeeded.value
                     scan_run.completed_at = datetime.now(timezone.utc)
+                    scan_run.error_message = None
                     await fetcher.close()
                     metrics.inc("scan_success_total")
                     logger.info(
@@ -215,4 +300,3 @@ async def run_monitor(company_id: int) -> dict:
 @shared_task(name="webwatcher.orchestration.monitor_worker.run_monitor_task")
 def run_monitor_task(company_id: int) -> dict:
     return asyncio.run(run_monitor(company_id))
-

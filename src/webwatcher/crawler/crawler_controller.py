@@ -18,9 +18,10 @@ IR_PATH_HINTS = (
 
 
 class CrawlerController:
-    def __init__(self, fetcher: Fetcher, max_depth: int = 2) -> None:
+    def __init__(self, fetcher: Fetcher, max_depth: int = 2, max_pages: int = 50) -> None:
         self.fetcher = fetcher
         self.max_depth = max_depth
+        self.max_pages = max_pages
 
     async def crawl_targeted(self, root_url: str) -> list[str]:
         root = normalize_url(root_url)
@@ -29,7 +30,7 @@ class CrawlerController:
         visited: set[str] = set()
         discovered: list[str] = []
 
-        while queue:
+        while queue and len(discovered) < self.max_pages:
             url, depth = queue.popleft()
             if url in visited or depth > self.max_depth:
                 continue
@@ -60,4 +61,3 @@ class CrawlerController:
                 if candidate not in visited:
                     queue.append((candidate, depth + 1))
         return discovered
-
